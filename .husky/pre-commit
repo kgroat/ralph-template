@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -euo pipefail
+
+# # Your validation commands go here
+# # For example:
+# npm run test
+# npm run typecheck
+# npm run build

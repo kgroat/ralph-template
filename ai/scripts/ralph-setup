@@ -1,0 +1,181 @@
+scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+ai_dir="$(cd "$scripts_dir/.." >/dev/null 2>&1 && pwd)"
+prompts_dir="$(cd "$ai_dir/prompts" >/dev/null 2>&1 && pwd)"
+root_dir="$(cd "$ai_dir/.." >/dev/null 2>&1 && pwd)"
+plan_name="$1"
+
+# set default values
+agent="build"
+iterations="10"
+
+# allow personal-defaults.env to override defaults
+[ -f "$scripts_dir/personal-defaults.env" ] && source "$scripts_dir/personal-defaults.env"
+
+# allow npm config to override defaults so they can be supplied via npm scripts
+iterations="${npm_config_iterations:-$iterations}"
+agent="${npm_config_agent:-$agent}"
+
+is_once=false
+[[ "$npm_lifecycle_event" == *once* ]] || [[ "$0" == *once* ]] && is_once=true
+
+function usage() {
+  if [ -z "$npm_lifecycle_event" ]; then
+    echo "Usage: $0 <plan_name> [options] -- [opencode options]"
+  else
+    echo "Usage: npm run $npm_lifecycle_event <plan_name> [options] -- [opencode options]"
+  fi
+
+  if $is_once; then
+    echo "Runs a single iteration of the Ralph agent for the specified plan."
+  else  
+    echo "Executes the Ralph agent loop for the specified plan."
+  fi
+
+  echo ""
+  echo "After each ralph iteration, it will update progress.md in the plan directory with its progress and findings."
+  echo "The progress.md file is included in the prompt for subsequent steps."
+  echo "It is not checked into git, so it can be deleted or compacted as you see fit."
+  echo ""
+  echo "Options:"
+
+  if ! $is_once; then
+    echo "  --iterations=<number>   Number of iterations to run (default: $iterations)"
+  fi
+
+  echo "  --agent=<name>          Agent to use (default: $agent)"
+  echo ""
+  echo "All options after -- will be forwarded to the underlying opencode command."
+  echo "To see what options are available for opencode run, execute 'opencode run --help'"
+}
+
+if [ -z "$plan_name" ]; then
+  usage >&2
+  echo "" >&2
+  echo $(tput setaf 1)"Error: plan_name is required."$(tput sgr0) >&2
+  exit 1
+fi
+
+shift # consume the plan name argument
+
+has_bad_option=false
+script_args="$@"
+
+function bad_once_option() {
+  option="--$1"
+  config_name="npm_config_$1"
+  if $is_once && ( \
+
+    # Don't allow the option if it's set via npm config
+    [ -n "${!config_name}" ] || \
+
+    # Don't allow --option
+    [[ " $script_args " == *" $option "* ]] || \
+
+    # Don't allow --option=value
+    [[ " $script_args " == *" $option="* ]] \
+  ); then
+    echo "Error: $option option is not valid with ralph-once." >&2
+    has_bad_option=true
+  fi
+}
+
+bad_once_option "iterations"
+if [ "$has_bad_option" = 'true' ]; then
+  exit 1
+fi
+
+# Check for options; remove known options & forward the rest to "opencode run"
+forwarded_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --iterations)
+      # capture --iterations option; the next argument is the actual value of the --iterations option
+      shift
+      if [ -z "$1" ] || [[ "$1" == --* ]]; then
+        echo "Error: --iterations requires a value." >&2
+        exit 1
+      fi
+      iterations="$1"
+      ;;
+    --iterations=*)
+      # capture --iterations=123 option
+      iterations="${1:13}" # Substring to after 13 characters (the length of "--iterations=")
+      ;;
+    --agent)
+      # capture --agent option; the next argument is the actual value of the --agent option
+      shift
+      if [ -z "$1" ] || [[ "$1" == --* ]]; then
+        echo "Error: --agent requires a value." >&2
+        exit 1
+      fi
+      agent="$1"
+      ;;
+    --agent=*)
+      # capture --agent=name option
+      agent="${1:8}" # Substring to after 8 characters (the length of "--agent=")
+      ;;
+    --)
+      # assume all options after -- are for opencode run
+      shift
+      forwarded_args+=$@
+      break
+      ;;
+    *)
+      # assume any option not captured above is for opencode run
+      forwarded_args+=("$1")
+      ;;
+  esac
+
+  shift
+done
+
+validate_integer() {
+  local value="$1"
+  local name="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "Error: $name must be a positive integer. Got '$value'." >&2
+    exit 1
+  fi
+}
+
+validate_integer "$iterations" "iterations"
+
+if [ -d "$ai_dir/plans/$plan_name" ]; then
+  plan_dir="$ai_dir/plans/$plan_name"
+  plan_valid=true
+
+  if [ ! -f "$plan_dir/design.md" ]; then
+    echo "Plan '$plan_name' is missing design.md file." >&2
+    plan_valid=false
+  fi
+
+  if [ ! -f "$plan_dir/prd.json" ]; then
+    echo "Plan '$plan_name' is missing prd.json file." >&2
+    plan_valid=false
+  fi
+
+  if [ "$plan_valid" = 'false' ]; then
+    echo "Please create the plan files before continuing." >&2
+    exit 1
+  fi
+else
+  echo "Plan '$plan_name' does not exist." >&2
+  echo "Available plans:" >&2
+  ls "$ai_dir/plans" >&2
+  exit 1
+fi
+
+touch $plan_dir/progress.md
+
+prompt_file="$prompts_dir/ralph.example.md"
+if [ -f "$prompts_dir/ralph.md" ]; then
+  prompt_file="$prompts_dir/ralph.md"
+fi
+
+prompt="\
+@ai/plans/$plan_name/design.md \
+@ai/plans/$plan_name/prd.json \
+@ai/plans/$plan_name/progress.md \
+$(cat "$prompt_file")"
+
+cd "$root_dir"
